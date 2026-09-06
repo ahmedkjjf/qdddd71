@@ -1,0 +1,8 @@
+{
+  "name": "Remix: مستضيف بوتات ديسكورد السريع",
+  "description": "منصة سهلة لرفع وتشغيل وتعديل بوتات ديسكورد مباشرة من المتصفح مع كونسول حي ومحرر أكواد فوري.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

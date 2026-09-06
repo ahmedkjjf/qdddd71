@@ -2,7 +2,7 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import fs from "fs/promises";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { GoogleGenAI } from "@google/genai";
 import prettier from "prettier";
 
@@ -38,6 +38,8 @@ let activeEntrypoint = "bot.js";
 let keepAlive24_7 = true;
 let isIntentionalStop = false;
 let watchdogRestartTimer: any = null;
+let rapidCrashCount = 0;
+let botStartTime = 0;
 
 const DEFAULT_BOT_CODE = `import { Client, GatewayIntentBits } from 'discord.js';
 import { GoogleGenAI } from '@google/genai';
@@ -252,7 +254,26 @@ async function startBotProcess() {
   try {
     await saveBotWorkspace(currentToken, currentCode);
 
-    botProcess = spawn('npx', ['tsx', `./bot_workspace/${activeEntrypoint}`], {
+    // If JavaScript file, perform a fast syntax check before running to prevent crash loops
+    if (activeEntrypoint.endsWith('.js')) {
+      const check = spawnSync('node', ['-c', `./bot_workspace/${activeEntrypoint}`], { encoding: 'utf-8' });
+      if (check.status !== 0) {
+        botStatus = 'error';
+        const errDetail = check.stderr?.trim() || check.stdout?.trim() || 'خطأ في بنية الكود';
+        addLog(`❌ [خطأ في كود البوت]: لا يمكن تشغيل البوت لوجود خطأ نحوي في الكود (Syntax Error):`);
+        addLog(`[ERR] ${errDetail}`);
+        addLog(`💡 يرجى مراجعة الكود في المحرر وإصلاح الخطأ ثم الضغط على 'حفظ الكود' و 'تشغيل البوت'.`);
+        return;
+      }
+    }
+
+    // Determine runner: Use node natively for JS (completely eliminates tsx esbuild transform issues), tsx for TS
+    const isTs = activeEntrypoint.endsWith('.ts');
+    const runner = isTs ? 'npx' : 'node';
+    const args = isTs ? ['tsx', `./bot_workspace/${activeEntrypoint}`] : ['--experimental-detect-module', `./bot_workspace/${activeEntrypoint}`];
+
+    botStartTime = Date.now();
+    botProcess = spawn(runner, args, {
       env: {
         ...process.env,
         DISCORD_TOKEN: currentToken,
@@ -285,6 +306,20 @@ async function startBotProcess() {
       addLog(`💤 توقفت عملية البوت (كود الإغلاق: ${code})`);
       botStatus = 'offline';
       botProcess = null;
+
+      const runDurationSec = (Date.now() - botStartTime) / 1000;
+      if (runDurationSec < 4) {
+        rapidCrashCount++;
+      } else {
+        rapidCrashCount = 0; // Reset if bot stayed alive
+      }
+
+      // Check for rapid crash loop (e.g. invalid Discord Token or fatal error)
+      if (rapidCrashCount >= 3) {
+        addLog("⚠️ [مراقب 24/7] تم إيقاف إعادة التشغيل التلقائي مؤقتاً لتجنب تكرار الانهيار فور التشغيل (غالباً بسبب توكن ديسكورد غير صالح أو انتهاء صلاحيته).");
+        addLog("💡 يرجى التأكد من وضع توكن ديسكورد صالح وجديد ثم الضغط على زر 'تشغيل البوت'.");
+        return;
+      }
 
       // 24/7 Watchdog: Auto-restart if not intentionally stopped by user
       if (!isIntentionalStop && keepAlive24_7 && (currentToken || currentCode.includes('client.login'))) {
@@ -515,6 +550,9 @@ app.post("/api/bot/start", async (req, res) => {
   const { token, code } = req.body;
   if (token !== undefined) currentToken = token;
   if (code !== undefined) currentCode = code;
+
+  // Reset crash loop counter when user explicitly clicks start
+  rapidCrashCount = 0;
 
   // Run async but respond immediately so client doesn't hang
   startBotProcess();

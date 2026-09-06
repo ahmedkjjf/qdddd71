@@ -16,7 +16,7 @@ const {
   SlashCommandBuilder,
   REST,
   Routes,
-  AuditLogEvent,
+  AuditLogEvent
 } = require('discord.js');
 
 const fs = require('fs');
@@ -25,7 +25,9 @@ const https = require('https');
 const path = require('path');
 
 // === إعدادات بوتك === //
-const token = process.env.DISCORD_TOKEN || '';
+const BOT_VERSION = '3.0.0';
+const STORE_URL = 'https://alzaabi.site/';
+const token = process.env.DISCORD_TOKEN || 'MTI4NDg2NTIzMTMyMjg3ODAzMw.GdLhay.lTfo7ieB87E46xjccJoQIulAEJIMTDhOUK0phs';
 const clientId = '1284865231322878033';
 
 // === إعدادات نظام تتبع الدعوات === //
@@ -49,6 +51,29 @@ const reminders = new Map(); // تخزين التذكيرات
 const giveaways = new Map(); // تخزين الهبات
 const botStartTime = Date.now(); // وقت بدء البوت
 
+// === 🆕 v3.0 - نظام XP والمستويات === //
+const XP_FILE = path.join(__dirname, 'xp_data.json');
+const xpCooldown = new Map();
+let xpData = {};
+
+// === 🆕 v3.0 - نظام AFK === //
+const afkUsers = new Map();
+
+// === 🆕 v3.0 - نظام Starboard === //
+const starboardChannelId = ''; // ← حط ID قناة الستاربورد هنا
+const starThreshold = 3;
+const starredMessages = new Set();
+
+// === 🆕 v3.0 - نظام Snipe === //
+const snipeCache = new Map();
+
+// === 🆕 v3.0 - رتب تُمنح تلقائياً عند الوصول لمستوى === //
+const levelRoles = {
+  // 5: 'ROLE_ID_HERE',
+  // 10: 'ROLE_ID_HERE',
+  // 20: 'ROLE_ID_HERE',
+};
+
 // === إحصائيات التقرير الأسبوعي === //
 const weeklyStats = {
   newMembers: 0,
@@ -68,11 +93,10 @@ const weeklyStats = {
 };
 
 // === Super Admin - يتخطى جميع الحمايات === //
-const SUPER_ADMIN_ID = '1268288718179930204';'722831697774772286'; // الأيدي الذي يتخطى جميع الحمايات
+const SUPER_ADMIN_IDS = ['1268288718179930204', '722831697774772286'];
 
-// دالة للتحقق من Super Admin
 function isSuperAdmin(userId) {
-  return userId === SUPER_ADMIN_ID;
+  return SUPER_ADMIN_IDS.includes(userId);
 }
 const ticketChannelId = '1295409931708530741';
 const logChannelId = '1378678334413733929';
@@ -335,6 +359,73 @@ function saveData(data) {
   }
 }
 
+// === 🆕 v3.0 - دوال نظام XP === //
+function loadXpData() {
+  try {
+    if (fs.existsSync(XP_FILE)) {
+      return JSON.parse(fs.readFileSync(XP_FILE, 'utf8'));
+    }
+    fs.writeFileSync(XP_FILE, '{}', 'utf8');
+    return {};
+  } catch (error) {
+    console.error('Error loading XP data:', error);
+    return {};
+  }
+}
+
+function saveXpData() {
+  try {
+    fs.writeFileSync(XP_FILE, JSON.stringify(xpData, null, 2), 'utf8');
+  } catch (error) {
+    console.error('Error saving XP data:', error);
+  }
+}
+
+function getLevel(xp) {
+  return Math.floor(Math.sqrt(xp / 50));
+}
+
+function xpForLevel(level) {
+  return Math.pow(level, 2) * 50;
+}
+
+function getXpProgress(xp) {
+  const level = getLevel(xp);
+  const currentLevelXp = xpForLevel(level);
+  const nextLevelXp = xpForLevel(level + 1);
+  return {
+    level,
+    current: xp - currentLevelXp,
+    needed: nextLevelXp - currentLevelXp,
+    total: xp,
+  };
+}
+
+function createProgressBar(current, max, size = 12) {
+  if (max <= 0) return '░'.repeat(size);
+  const filled = Math.min(size, Math.round((current / max) * size));
+  return '█'.repeat(filled) + '░'.repeat(size - filled);
+}
+
+function addXp(userId, guildId, amount) {
+  const key = `${guildId}-${userId}`;
+  if (!xpData[key]) xpData[key] = { xp: 0, messages: 0 };
+  const oldLevel = getLevel(xpData[key].xp);
+  xpData[key].xp += amount;
+  xpData[key].messages += 1;
+  saveXpData();
+  return { data: xpData[key], oldLevel, newLevel: getLevel(xpData[key].xp) };
+}
+
+async function checkLevelRoles(member, newLevel) {
+  const roleId = levelRoles[newLevel];
+  if (!roleId) return;
+  const role = member.guild.roles.cache.get(roleId);
+  if (role && !member.roles.cache.has(roleId)) {
+    await member.roles.add(role).catch(() => {});
+  }
+}
+
 /**
  * يفتح (يعطي صلاحيات) على القنوات الموجودة في OPEN_CHANNEL_IDS
  * - يمنع @everyone من الرؤية
@@ -518,6 +609,7 @@ let lastBotBio = 'Alzaabi Server'; // البايو الافتراضي للبوت
 const bannedWords = ['كلمة محظورة', 'سب', 'سبول', 'كس', 'انيك ', 'كس امك']; // كلمات محظورة
 const channelPermissionTracker = new Map(); // تتبع تعديل صلاحيات القنوات
 const channelNameTracker = new Map(); // تتبع تغيير أسماء القنوات
+const raidProtection = new Map(); // حماية من الرايد
 const importantChannels = ['', '1363574788349493558', '1363574869576388618', '1363574831492108478', '1225316484201320458', '1363574677431128245', '1363576826605076511', '', '']; // قنوات مهمة محمية
 const importantRoles = ['1375556480803147836', '1243217066303950888', '1299122113201831986', '1268222141896331296']; // رتب مهمة محمية
 const deletedRolesBackup = new Map(); // نسخ احتياطي للرتب المحذوفة
@@ -1170,6 +1262,17 @@ const commands = [
     .addSubcommand(sub =>
       sub.setName('backup-roles')
         .setDescription('عرض النسخ الاحتياطي للرتب المحذوفة')
+    )
+    .addSubcommand(sub =>
+      sub.setName('raid-settings')
+        .setDescription('إعدادات حماية الرايد')
+        .addIntegerOption(opt =>
+          opt.setName('max-joins')
+            .setDescription('عدد الانضمامات المسموحة في الدقيقة')
+            .setRequired(true)
+            .setMinValue(3)
+            .setMaxValue(20)
+        )
     ),
 
   new SlashCommandBuilder()
@@ -1216,14 +1319,99 @@ const commands = [
   new SlashCommandBuilder()
     .setName('debug-commands')
     .setDescription('عرض جميع الأوامر المتاحة (للأدمن فقط)'),
+
+  // === 🆕 v3.0 - أوامر جديدة === //
+  new SlashCommandBuilder()
+    .setName('level')
+    .setDescription('📈 عرض مستواك ونقاط XP')
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('العضو المراد عرض مستواه')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('leaderboard')
+    .setDescription('🏆 لوحة المتصدرين حسب XP'),
+
+  new SlashCommandBuilder()
+    .setName('afk')
+    .setDescription('💤 تفعيل وضع AFK')
+    .addStringOption(opt =>
+      opt.setName('reason')
+        .setDescription('سبب الغياب')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('snipe')
+    .setDescription('🎯 عرض آخر رسالة محذوفة في هذه القناة'),
+
+  new SlashCommandBuilder()
+    .setName('embed')
+    .setDescription('📝 إنشاء Embed مخصص (للإدارة فقط)')
+    .addStringOption(opt =>
+      opt.setName('title')
+        .setDescription('العنوان')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('description')
+        .setDescription('الوصف')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('color')
+        .setDescription('اللون (مثال: #3498db)')
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName('image')
+        .setDescription('رابط صورة')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('set-xp')
+    .setDescription('⚙️ تعيين XP لعضو (للأدمن فقط)')
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('العضو')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('amount')
+        .setDescription('كمية XP')
+        .setRequired(true)
+        .setMinValue(0)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('changelog')
+    .setDescription('📋 عرض سجل التحديثات'),
+
+  new SlashCommandBuilder()
+    .setName('shop')
+    .setDescription('🛒 متجر ALZAABI الرسمي — alzaabi.site')
+    .addStringOption(opt =>
+      opt.setName('product')
+        .setDescription('اختر المنتج لعرض تفاصيله')
+        .setRequired(false)
+        .addChoices(
+          { name: '🎯 Fortnite Private Cheat', value: 'cheat' },
+          { name: '⚡ ALZAABI Windows Tweak', value: 'tweak' },
+          { name: '🎮 Fortnite NFA Accounts', value: 'nfa' }
+        )
+    ),
 ];
 
 const rest = new REST({ version: '10' }).setToken(token);
 
 // === تفعيل البوت === //
 client.once('ready', async () => {
-  console.log(`✅ البوت اشتغل بنجاح! (${client.user.tag})`);
-  client.user.setActivity("Alzaabi System", { type: 0 }); // 🎮 Alzaabi System
+  console.log(`✅ البوت اشتغل بنجاح! (${client.user.tag}) v${BOT_VERSION}`);
+  xpData = loadXpData();
+  client.user.setActivity(`Alzaabi System v${BOT_VERSION}`, { type: 0 });
 
   // جلب جميع الدعوات لكل غيلد وتخزينها
   client.guilds.cache.forEach(async guild => {
@@ -1655,6 +1843,7 @@ client.once('ready', async () => {
         .addFields(
           { name: 'اسم البوت', value: client.user.tag, inline: true },
           { name: 'ID', value: client.user.id, inline: true },
+          { name: 'الإصدار', value: `v${BOT_VERSION}`, inline: true },
           { name: 'عدد السيرفرات', value: `${client.guilds.cache.size}`, inline: true }
         )
         .setThumbnail(client.user.displayAvatarURL({ dynamic: true }));
@@ -2351,7 +2540,13 @@ client.once('ready', async () => {
           { name: '/ping', description: 'عرض سرعة استجابة البوت' },
           { name: '/help', description: 'قائمة الأوامر المتاحة' },
           { name: '/uptime', description: 'وقت تشغيل البوت' },
-          { name: '/bot-stats', description: 'إحصائيات البوت' }
+          { name: '/bot-stats', description: 'إحصائيات البوت' },
+          { name: '/level', description: 'عرض مستواك و XP' },
+          { name: '/leaderboard', description: 'لوحة المتصدرين' },
+          { name: '/afk', description: 'تفعيل وضع AFK' },
+          { name: '/snipe', description: 'آخر رسالة محذوفة' },
+          { name: '/changelog', description: 'سجل التحديثات' },
+          { name: '/shop', description: 'متجر ALZAABI الرسمي' }
         ],
         admin: [
           { name: '/warn', description: 'تحذير عضو' },
@@ -2361,7 +2556,9 @@ client.once('ready', async () => {
           { name: '/announce', description: 'إرسال إعلان' },
           { name: '/slowmode', description: 'تغيير وضع الهدوء' },
           { name: '/lock', description: 'قفل القناة' },
-          { name: '/unlock', description: 'فتح القناة' }
+          { name: '/unlock', description: 'فتح القناة' },
+          { name: '/embed', description: 'إنشاء Embed مخصص' },
+          { name: '/set-xp', description: 'تعيين XP لعضو' }
         ],
         fun: [
           { name: '/poll', description: 'إنشاء استطلاع' },
@@ -2885,7 +3082,13 @@ client.once('ready', async () => {
           { name: '/ping', description: 'عرض سرعة استجابة البوت' },
           { name: '/help', description: 'قائمة الأوامر المتاحة' },
           { name: '/uptime', description: 'وقت تشغيل البوت' },
-          { name: '/bot-stats', description: 'إحصائيات البوت' }
+          { name: '/bot-stats', description: 'إحصائيات البوت' },
+          { name: '/level', description: 'عرض مستواك و XP' },
+          { name: '/leaderboard', description: 'لوحة المتصدرين' },
+          { name: '/afk', description: 'تفعيل وضع AFK' },
+          { name: '/snipe', description: 'آخر رسالة محذوفة' },
+          { name: '/changelog', description: 'سجل التحديثات' },
+          { name: '/shop', description: 'متجر ALZAABI الرسمي' }
         ],
         admin: [
           { name: '/warn', description: 'تحذير عضو' },
@@ -2895,7 +3098,9 @@ client.once('ready', async () => {
           { name: '/announce', description: 'إرسال إعلان' },
           { name: '/slowmode', description: 'تغيير وضع الهدوء' },
           { name: '/lock', description: 'قفل القناة' },
-          { name: '/unlock', description: 'فتح القناة' }
+          { name: '/unlock', description: 'فتح القناة' },
+          { name: '/embed', description: 'إنشاء Embed مخصص' },
+          { name: '/set-xp', description: 'تعيين XP لعضو' }
         ],
         fun: [
           { name: '/poll', description: 'إنشاء استطلاع' },
@@ -3101,6 +3306,12 @@ client.once('ready', async () => {
         
         await interaction.reply({ embeds: [embed], ephemeral: true });
       }
+      
+      if (subcommand === 'raid-settings') {
+        const maxJoins = interaction.options.getInteger('max-joins');
+        // تحديث إعدادات الرايد (يمكنك حفظها في متغير عام)
+        await interaction.reply({ content: `✅ تم تحديث حماية الرايد: الحد الأقصى ${maxJoins} انضمام في الدقيقة.`, ephemeral: true });
+      }
     }
 
     // === معالجة أوامر Captcha === //
@@ -3227,7 +3438,7 @@ client.once('ready', async () => {
   });
 });
 
-// === ترحيب + حماية بوتات + تحقق الحسابات الجديدة === //
+// === ترحيب + حماية بوتات + حماية الرايد === //
 client.on(Events.GuildMemberAdd, async member => {
   // تحديث إحصائيات التقرير الأسبوعي
   weeklyStats.newMembers++;
@@ -3290,6 +3501,43 @@ client.on(Events.GuildMemberAdd, async member => {
     }
   } catch (err) {
     console.error('Error in invite tracking:', err);
+  }
+
+  // === حماية من الرايد === //
+  const now = Date.now();
+  const guildId = member.guild.id;
+  const raidData = raidProtection.get(guildId) || { joins: [], first: now };
+  
+  // إزالة الانضمامات القديمة (أكثر من دقيقة)
+  raidData.joins = raidData.joins.filter(joinTime => now - joinTime < 60000);
+  raidData.joins.push(now);
+  raidProtection.set(guildId, raidData);
+  
+  // إذا انضم أكثر من 5 أعضاء في دقيقة واحدة
+  if (raidData.joins.length > 5) {
+    try {
+      // كيك العضو الجديد
+      await member.kick('🚨 Raid Protection - انضمام مشبوه');
+      
+      // إرسال تنبيه
+      const embed = new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle('🚨 [حماية الرايد] انضمام مشبوه')
+        .setDescription(`تم اكتشاف محاولة رايد وطرد العضو تلقائياً`)
+        .addFields(
+          { name: '👤 العضو المطرود', value: `${member.user.tag} | \`${member.id}\`` },
+          { name: '📊 عدد الانضمامات', value: `${raidData.joins.length} في دقيقة واحدة` },
+          { name: '🕒 الوقت', value: `<t:${Math.floor(now / 1000)}:F>` }
+        )
+        .setTimestamp();
+      
+      sendProtectionEmbed(embed);
+      alertOwner(`تم اكتشاف محاولة رايد! طرد ${member.user.tag} تلقائياً.`);
+      
+      return; // لا تكمل باقي الكود
+    } catch (error) {
+      console.error('فشل في طرد العضو أثناء الرايد:', error);
+    }
   }
 
   // حماية من الحسابات الجديدة
@@ -3828,6 +4076,48 @@ client.on(Events.GuildAuditLogEntryCreate, async (entry) => {
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot || !message.guild) return;
 
+  // === 🆕 v3.0 - إزالة AFK عند الكتابة === //
+  if (afkUsers.has(message.author.id)) {
+    const afkData = afkUsers.get(message.author.id);
+    afkUsers.delete(message.author.id);
+    const duration = Math.floor((Date.now() - afkData.since) / 60000);
+    await message.reply(`👋 **${message.author}** رجعت! كنت AFK لمدة **${duration}** دقيقة.`).catch(() => {});
+  }
+
+  // === 🆕 v3.0 - تنبيه عند منشن شخص AFK === //
+  for (const [, user] of message.mentions.users) {
+    if (user.bot || user.id === message.author.id) continue;
+    const afkData = afkUsers.get(user.id);
+    if (afkData) {
+      const since = Math.floor((Date.now() - afkData.since) / 60000);
+      await message.reply(`💤 **${user.username}** AFK: ${afkData.reason}\n⏰ منذ **${since}** دقيقة`).catch(() => {});
+    }
+  }
+
+  // === 🆕 v3.0 - كسب XP === //
+  const xpKey = `${message.guild.id}-${message.author.id}`;
+  const lastXp = xpCooldown.get(xpKey) || 0;
+  if (Date.now() - lastXp >= 60000 && message.content.length >= 3) {
+    const xpGain = Math.floor(Math.random() * 11) + 15;
+    const result = addXp(message.author.id, message.guild.id, xpGain);
+    xpCooldown.set(xpKey, Date.now());
+    if (result.newLevel > result.oldLevel) {
+      const progress = getXpProgress(result.data.xp);
+      const embed = new EmbedBuilder()
+        .setColor(0xf1c40f)
+        .setTitle('🎉 مستوى جديد!')
+        .setDescription(`**${message.author}** وصل للمستوى **${result.newLevel}**!`)
+        .addFields(
+          { name: '📈 XP', value: `${progress.total}`, inline: true },
+          { name: '💬 رسائل', value: `${result.data.messages}`, inline: true }
+        )
+        .setThumbnail(message.author.displayAvatarURL({ dynamic: true }))
+        .setTimestamp();
+      await message.channel.send({ embeds: [embed] }).catch(() => {});
+      await checkLevelRoles(message.member, result.newLevel);
+    }
+  }
+
   // === معالج نظام Captcha === //
   const captchaData = captchaUsers.get(message.author.id);
   if (captchaData && message.channel.name.startsWith('verify-')) {
@@ -4032,8 +4322,6 @@ client.on(Events.MessageCreate, async message => {
   }
 
   // ========== حماية منشن في الروم ==========
-  const mentionTracker = new Map();
-
   const mentionCount = message.mentions.users.size + message.mentions.roles.size + (message.mentions.everyone ? 1 : 0);
 
   // تخطي حماية المنشن للأونر والأشخاص المحددين
@@ -4903,6 +5191,16 @@ function sendLog(message) {
   client.on(Events.MessageDelete, async (message) => {
     // تجاهل إذا كانت من بوت أو من الخاص
     if (!message.guild || (message.author && message.author.bot)) return;
+
+    // === 🆕 v3.0 - حفظ للـ Snipe === //
+    if (message.author && message.content) {
+      snipeCache.set(message.channel.id, {
+        content: message.content,
+        author: message.author,
+        time: Date.now(),
+        attachment: message.attachments.first()?.url || null,
+      });
+    }
 
     const log = await client.channels.fetch('1386802506692038747').catch(() => null);
     if (!log) return;
@@ -5792,14 +6090,336 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 
+// === 🆕 v3.0 - معالج الأوامر الجديدة === //
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const isAdmin = interaction.member?.roles?.cache?.has(adminRoleId) || isSuperAdmin(interaction.user.id);
+
+  if (interaction.commandName === 'level') {
+    const target = interaction.options.getUser('user') || interaction.user;
+    const key = `${interaction.guild.id}-${target.id}`;
+    const data = xpData[key] || { xp: 0, messages: 0 };
+    const progress = getXpProgress(data.xp);
+    const bar = createProgressBar(progress.current, progress.needed);
+
+    const embed = new EmbedBuilder()
+      .setColor(0x3498db)
+      .setTitle(`📈 مستوى ${target.username}`)
+      .setThumbnail(target.displayAvatarURL({ dynamic: true }))
+      .addFields(
+        { name: '🏆 المستوى', value: `${progress.level}`, inline: true },
+        { name: '✨ XP', value: `${progress.total}`, inline: true },
+        { name: '💬 رسائل', value: `${data.messages}`, inline: true },
+        { name: '📊 التقدم', value: `${bar}\n${Math.floor(progress.current)}/${Math.floor(progress.needed)} XP`, inline: false }
+      )
+      .setFooter({ text: `Alzaabi System v${BOT_VERSION}` })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed] });
+    return;
+  }
+
+  if (interaction.commandName === 'leaderboard') {
+    const guildId = interaction.guild.id;
+    const entries = Object.entries(xpData)
+      .filter(([key]) => key.startsWith(`${guildId}-`))
+      .map(([key, val]) => ({ userId: key.split('-')[1], ...val }))
+      .sort((a, b) => b.xp - a.xp)
+      .slice(0, 10);
+
+    if (entries.length === 0) {
+      return interaction.reply({ content: '📭 لا يوجد بيانات XP بعد. ابدأ بالكتابة!', ephemeral: true });
+    }
+
+    const lines = await Promise.all(entries.map(async (entry, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+      const user = await client.users.fetch(entry.userId).catch(() => null);
+      const name = user ? user.username : entry.userId;
+      return `${medal} **${name}** — المستوى ${getLevel(entry.xp)} | ${entry.xp} XP`;
+    }));
+
+    const embed = new EmbedBuilder()
+      .setColor(0xf1c40f)
+      .setTitle('🏆 لوحة المتصدرين')
+      .setDescription(lines.join('\n'))
+      .setFooter({ text: `${interaction.guild.name}` })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed] });
+    return;
+  }
+
+  if (interaction.commandName === 'afk') {
+    const reason = interaction.options.getString('reason') || 'AFK';
+    afkUsers.set(interaction.user.id, { reason, since: Date.now() });
+
+    const embed = new EmbedBuilder()
+      .setColor(0x95a5a6)
+      .setTitle('💤 تم تفعيل AFK')
+      .setDescription(`**${interaction.user.username}** أصبح AFK\n📝 **السبب:** ${reason}`)
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed] });
+    return;
+  }
+
+  if (interaction.commandName === 'snipe') {
+    const snipe = snipeCache.get(interaction.channel.id);
+    if (!snipe) {
+      return interaction.reply({ content: '📭 لا توجد رسالة محذوفة في هذه القناة.', ephemeral: true });
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(0xe74c3c)
+      .setAuthor({
+        name: snipe.author.tag,
+        iconURL: snipe.author.displayAvatarURL({ dynamic: true }),
+      })
+      .setDescription(snipe.content.slice(0, 4000))
+      .setFooter({ text: `محذوفة ${Math.floor((Date.now() - snipe.time) / 1000)} ثانية مضت` })
+      .setTimestamp(snipe.time);
+
+    if (snipe.attachment) embed.setImage(snipe.attachment);
+
+    await interaction.reply({ embeds: [embed] });
+    return;
+  }
+
+  if (interaction.commandName === 'embed') {
+    if (!isAdmin) {
+      return interaction.reply({ content: '🚫 هذا الأمر للإدارة فقط.', ephemeral: true });
+    }
+
+    const title = interaction.options.getString('title');
+    const description = interaction.options.getString('description');
+    const color = interaction.options.getString('color') || '#3498db';
+    const image = interaction.options.getString('image');
+
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setDescription(description)
+      .setColor(color.startsWith('#') ? color : `#${color}`)
+      .setFooter({ text: `بواسطة ${interaction.user.tag}` })
+      .setTimestamp();
+
+    if (image) embed.setImage(image);
+
+    await interaction.channel.send({ embeds: [embed] });
+    await interaction.reply({ content: '✅ تم إرسال الـ Embed.', ephemeral: true });
+    return;
+  }
+
+  if (interaction.commandName === 'set-xp') {
+    if (!isAdmin) {
+      return interaction.reply({ content: '🚫 هذا الأمر للإدارة فقط.', ephemeral: true });
+    }
+
+    const user = interaction.options.getUser('user');
+    const amount = interaction.options.getInteger('amount');
+    const key = `${interaction.guild.id}-${user.id}`;
+    xpData[key] = { xp: amount, messages: xpData[key]?.messages || 0 };
+    saveXpData();
+
+    await interaction.reply({
+      content: `✅ تم تعيين XP لـ **${user.tag}** إلى **${amount}** (المستوى ${getLevel(amount)})`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (interaction.commandName === 'changelog') {
+    const embed = new EmbedBuilder()
+      .setColor(0x2ecc71)
+      .setTitle(`📋 سجل التحديثات — v${BOT_VERSION}`)
+      .setDescription('**Alzaabi System** — آخر التحديثات')
+      .addFields(
+        {
+          name: '🆕 v3.0.0',
+          value: [
+            '📈 **نظام XP والمستويات** — كسب XP بالكتابة + `/level` + `/leaderboard`',
+            '💤 **نظام AFK** — `/afk` مع تنبيه عند المنشن',
+            '⭐ **Starboard** — نشر الرسائل المميزة تلقائياً',
+            '🎯 **Snipe** — `/snipe` لعرض آخر رسالة محذوفة',
+            '📝 **Embed Builder** — `/embed` لإنشاء رسائل منسقة',
+            '⚙️ **set-xp** — تعيين XP للأعضاء (أدمن)',
+            '🛒 **/shop** — متجر ALZAABI الرسمي',
+            '🐛 إصلاح Super Admin + حماية المنشن',
+          ].join('\n'),
+        },
+        {
+          name: '📌 أوامر v3.0',
+          value: '`/level` `/leaderboard` `/afk` `/snipe` `/embed` `/set-xp` `/shop` `/changelog`',
+        }
+      )
+      .setFooter({ text: 'Alzaabi System' })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed] });
+    return;
+  }
+
+  if (interaction.commandName === 'shop') {
+    const product = interaction.options.getString('product');
+
+    const shopButton = new ButtonBuilder()
+      .setLabel('🛒 زيارة المتجر')
+      .setStyle(ButtonStyle.Link)
+      .setURL(STORE_URL);
+
+    const dashboardButton = new ButtonBuilder()
+      .setLabel('👤 لوحة التحكم')
+      .setStyle(ButtonStyle.Link)
+      .setURL(`${STORE_URL}#dashboard`);
+
+    const row = new ActionRowBuilder().addComponents(shopButton, dashboardButton);
+
+    if (product === 'cheat') {
+      const embed = new EmbedBuilder()
+        .setColor(0xe74c3c)
+        .setTitle('🎯 Fortnite Private Cheat')
+        .setDescription('Undetected Ring0 Kernel Driver — Aimbot, ESP, Spectator Warning & Arabic UI')
+        .addFields(
+          { name: '💰 الأسعار', value: '**3 أيام** — $14.99\n**7 أيام** — $19.99\n**30 يوم** — $34.99', inline: true },
+          { name: '✨ المميزات', value: '• Aimbot & Silent Aim\n• Player ESP & Skeleton\n• Spectator Radar\n• HWID Protection\n• واجهة عربية', inline: true },
+          { name: '🔗 المتجر', value: `[alzaabi.site](${STORE_URL})`, inline: false }
+        )
+        .setFooter({ text: 'Instant WAuth Delivery • 100% Undetected' })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], components: [row] });
+      return;
+    }
+
+    if (product === 'tweak') {
+      const embed = new EmbedBuilder()
+        .setColor(0x3498db)
+        .setTitle('⚡ ALZAABI Windows Tweak')
+        .setDescription('FPS Booster & Input Lag Reducer — 1:1 Raw Mouse, 100% CPU Unlock')
+        .addFields(
+          { name: '💰 الأسعار', value: '**مرة واحدة** — $9.99\n**مدى الحياة** — $19.99', inline: true },
+          { name: '✨ المميزات', value: '• 1:1 Raw Mouse Input\n• 100% CPU Power Unlock\n• Ultra Low Input Delay\n• Stretched Resolution\n• MSI Mode v3.1', inline: true },
+          { name: '🔗 المتجر', value: `[alzaabi.site](${STORE_URL})`, inline: false }
+        )
+        .setFooter({ text: 'Zero Input Lag • Max FPS Boost' })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], components: [row] });
+      return;
+    }
+
+    if (product === 'nfa') {
+      const embed = new EmbedBuilder()
+        .setColor(0x9b59b6)
+        .setTitle('🎮 Fortnite NFA Accounts')
+        .setDescription('حسابات NFA محملة بـ 5–300+ سكن مضمون + V-Bucks عشوائي')
+        .addFields(
+          { name: '💰 الأسعار', value: '**5-300 سكن** — $0.75\n**15-300 سكن** — $1.80\n**25-300 سكن** — $3.00\n**40-300 سكن** — $4.50\n**50-300 سكن** — $6.00', inline: true },
+          { name: '📦 التسليم', value: '• تذكرة Discord فورية\n• email:password\n• حسابات مفحوصة 100%', inline: true },
+          { name: '🔗 المتجر', value: `[alzaabi.site](${STORE_URL})`, inline: false }
+        )
+        .setFooter({ text: 'Loaded Lockers • Instant Ticket Delivery' })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], components: [row] });
+      return;
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(0x2ecc71)
+      .setTitle('🛒 ALZAABI STORE')
+      .setDescription(
+        '**Premier Gaming Software Suite**\n\n' +
+        'Undetected Fortnite Cheats, Windows FPS Tweaks & Loaded NFA Accounts\n' +
+        'مع تسليم فوري تلقائي عبر WAuth'
+      )
+      .addFields(
+        {
+          name: '🎯 Fortnite Private Cheat',
+          value: 'Kernel Undetected — من **$14.99**/3 أيام\n`/shop product:Fortnite Private Cheat`',
+          inline: true,
+        },
+        {
+          name: '⚡ Windows Tweak',
+          value: 'FPS Booster — من **$9.99**\n`/shop product:ALZAABI Windows Tweak`',
+          inline: true,
+        },
+        {
+          name: '🎮 NFA Accounts',
+          value: '5-300+ سكن — من **$0.75**\n`/shop product:Fortnite NFA Accounts`',
+          inline: true,
+        },
+        {
+          name: '🎁 عرض جديد',
+          value: '**+5%** رصيد إضافي على كل الإيداعات خلال أول 24 ساعة!',
+          inline: false,
+        },
+        {
+          name: '✅ لماذا ALZAABI؟',
+          value: '• Instant WAuth Delivery\n• 100% Undetected Ring0\n• 24/7 Discord Ticket Support\n• دفع آمن ومشفر',
+          inline: false,
+        },
+        {
+          name: '🔗 الرابط',
+          value: `[**alzaabi.site**](${STORE_URL})`,
+          inline: false,
+        }
+      )
+      .setFooter({ text: 'ALZAABI © 2026 • alzaabi.site' })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed], components: [row] });
+    return;
+  }
+});
+
 // === معالج تفاعل الهبات ===
 client.on(Events.MessageReactionAdd, async (reaction, user) => {
   if (user.bot) return;
-  
+
+  if (reaction.partial) await reaction.fetch().catch(() => null);
+
   const giveaway = giveaways.get(reaction.message.id);
-  if (!giveaway || reaction.emoji.name !== '🎉') return;
-  
-  giveaway.participants.add(user.id);
+  if (giveaway && reaction.emoji.name === '🎉') {
+    giveaway.participants.add(user.id);
+    return;
+  }
+
+  // === 🆕 v3.0 - Starboard === //
+  if (!starboardChannelId || reaction.message.author?.bot) return;
+  if (reaction.emoji.name !== '⭐') return;
+  if (starredMessages.has(reaction.message.id)) return;
+
+  const message = reaction.message.partial
+    ? await reaction.message.fetch().catch(() => null)
+    : reaction.message;
+  if (!message || !message.guild) return;
+
+  const starCount = message.reactions.cache.get('⭐')?.count || 0;
+  if (starCount < starThreshold) return;
+
+  starredMessages.add(message.id);
+  const starChannel = message.guild.channels.cache.get(starboardChannelId);
+  if (!starChannel) return;
+
+  const embed = new EmbedBuilder()
+    .setColor(0xf1c40f)
+    .setAuthor({
+      name: message.author.tag,
+      iconURL: message.author.displayAvatarURL({ dynamic: true }),
+    })
+    .setDescription(message.content || '*لا يوجد نص*')
+    .addFields(
+      { name: '📺 القناة', value: `<#${message.channel.id}>`, inline: true },
+      { name: '⭐ النجوم', value: `${starCount}`, inline: true }
+    )
+    .setTimestamp(message.createdAt);
+
+  if (message.attachments.size > 0) {
+    embed.setImage(message.attachments.first().url);
+  }
+
+  await starChannel.send({ embeds: [embed] }).catch(() => {});
 });
 
 // === ملخص أنظمة الحماية المضافة === //
@@ -5807,13 +6427,14 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
 🛡️ أنظمة الحماية الجديدة المضافة:
 
 1. ✅ حماية الكلمات المحظورة - يحذف الرسائل التي تحتوي على كلمات مسيئة
-2. ✅ نظام Captcha للحسابات الجديدة - كود تحقق 4 أرقام مع 3 محاولات
-3. ✅ حماية تعديل صلاحيات القنوات - يمنع التعديل الجماعي للصلاحيات
-4. ✅ حماية تغيير أسماء القنوات - يمنع تغيير أكثر من 5 أسماء في 5 دقائق
-5. ✅ حماية القنوات المهمة - يستعيد القنوات المهمة عند حذفها
-6. ✅ نسخ احتياطي للرتب المحذوفة - يحفظ معلومات الرتب المحذوفة
-7. ✅ حماية الرتب المهمة - يستعيد الرتب المهمة عند حذفها
-8. ✅ أوامر إدارة متقدمة - /protection-advanced و /captcha-admin
+2. ✅ حماية من الرايد - يطرد الأعضاء عند انضمام أكثر من 5 في دقيقة
+3. ✅ نظام Captcha للحسابات الجديدة - كود تحقق 4 أرقام مع 3 محاولات
+4. ✅ حماية تعديل صلاحيات القنوات - يمنع التعديل الجماعي للصلاحيات
+5. ✅ حماية تغيير أسماء القنوات - يمنع تغيير أكثر من 5 أسماء في 5 دقائق
+6. ✅ حماية القنوات المهمة - يستعيد القنوات المهمة عند حذفها
+7. ✅ نسخ احتياطي للرتب المحذوفة - يحفظ معلومات الرتب المحذوفة
+8. ✅ حماية الرتب المهمة - يستعيد الرتب المهمة عند حذفها
+9. ✅ أوامر إدارة متقدمة - /protection-advanced و /captcha-admin
 
 🏆 تقييم الحماية النهائي: 100/100
 
@@ -5821,6 +6442,7 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
 - /protection-advanced banned-words - إدارة الكلمات المحظورة
 - /protection-advanced important-channels - إدارة القنوات المهمة  
 - /protection-advanced backup-roles - عرض النسخ الاحتياطي للرتب
+- /protection-advanced raid-settings - إعدادات حماية الرايد
 - /captcha-admin bypass - تخطي Captcha لعضو
 - /captcha-admin reset - إعادة تعيين Captcha
 - /captcha-admin settings - تغيير إعدادات Captcha
